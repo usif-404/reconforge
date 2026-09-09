@@ -1,0 +1,21 @@
+# Never commit real secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Docker/data volumes if ever mounted locally
+pgdata/
+recon_artifacts/
+
+# Wordlists (large, downloadable via scripts/setup_wordlists.sh)
+wordlists/
+
+# OS/editor junk
+.DS_Store
+.idea/
+.vscode/

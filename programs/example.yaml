@@ -1,0 +1,33 @@
+program:
+  name: example
+  platform: hackerone
+
+scope:
+  include:
+    - "*.example.com"
+    - "api.example.com"
+  exclude:
+    - "support.example.com"
+    - "careers.example.com"
+  include_ip_ranges: []   # only if the program explicitly authorizes IP ranges
+
+rules:
+  passive_recon: true
+  crawling: true
+  active_dns: true
+  directory_discovery: false
+  automated_scanning: true
+
+rate_limits:
+  global_rps: 5
+  concurrency: 10
+
+prohibited:
+  - dos
+  - social_engineering
+  - destructive_testing
+
+notes: >
+  Fill this in from the program's actual policy page before enabling
+  automated_scanning. When in doubt, leave a rule false and run it manually
+  once instead.

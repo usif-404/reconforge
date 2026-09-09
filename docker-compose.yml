@@ -1,0 +1,159 @@
+version: "3.9"
+
+# Sized for: AWS t3.large, 2 vCPU, 7.6GB RAM, no GPU, no swap by default.
+# Run scripts/setup_vps_swap.sh once before `docker compose up` — it adds a
+# 4GB swap file as an OOM safety net (not a substitute for the limits below).
+#
+# Memory budget (must stay under ~7.6GB total, leaving headroom for the
+# host OS + swap as the safety margin, not the plan):
+#   postgres        1024m
+#   redis            256m
+#   api              512m
+#   worker-passive   512m   (x1 process, concurrency=2 internally)
+#   worker-http      512m   (concurrency=2)
+#   worker-crawler  1024m   (concurrency=1 — heaviest single stage: katana/JS)
+#   worker-nuclei    768m   (concurrency=1, -rl 5)
+#   worker-ai        512m   (concurrency=2, API-bound not compute-bound)
+#   beat             256m
+#   -----------------------
+#   total          ~5.4GB, leaving ~2.2GB headroom on a 7.6GB box.
+#
+# AI calls go through the Anthropic API — no local model, no GPU requirement.
+# Do not add an Ollama/local-LLM service to this box; see ARCHITECTURE.md.
+
+services:
+  postgres:
+    image: postgres:16
+    mem_limit: 1024m
+    cpus: 0.5
+    environment:
+      POSTGRES_USER: reconforge
+      POSTGRES_PASSWORD: reconforge
+      POSTGRES_DB: reconforge
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reconforge"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    mem_limit: 256m
+    cpus: 0.25
+    command: redis-server --maxmemory 200mb --maxmemory-policy allkeys-lru
+    ports:
+      - "127.0.0.1:6379:6379"
+
+  api:
+    build: ./api
+    mem_limit: 512m
+    cpus: 0.5
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://reconforge:reconforge@postgres:5432/reconforge
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./programs:/programs:ro
+      - recon_artifacts:/artifacts
+
+  worker-passive-recon:
+    build: ./api
+    mem_limit: 512m
+    cpus: 0.4
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://reconforge:reconforge@postgres:5432/reconforge
+      REDIS_URL: redis://redis:6379/0
+    command: celery -A app.workers.celery_app worker -Q passive_recon --loglevel=info -c 2
+    depends_on: [postgres, redis]
+    volumes:
+      - ./programs:/programs:ro
+      - recon_artifacts:/artifacts
+
+  worker-http-probe:
+    build: ./api
+    mem_limit: 512m
+    cpus: 0.4
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://reconforge:reconforge@postgres:5432/reconforge
+      REDIS_URL: redis://redis:6379/0
+    command: celery -A app.workers.celery_app worker -Q http_probe --loglevel=info -c 2
+    depends_on: [postgres, redis]
+    volumes:
+      - ./programs:/programs:ro
+      - recon_artifacts:/artifacts
+
+  worker-crawler:
+    build: ./api
+    mem_limit: 1024m
+    cpus: 0.6
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://reconforge:reconforge@postgres:5432/reconforge
+      REDIS_URL: redis://redis:6379/0
+    # concurrency=1 on purpose — katana/JS analysis is the most CPU/RAM-hungry
+    # stage on this box; don't run two crawls at once here.
+    command: celery -A app.workers.celery_app worker -Q crawler --loglevel=info -c 1
+    depends_on: [postgres, redis]
+    volumes:
+      - ./programs:/programs:ro
+      - recon_artifacts:/artifacts
+
+  worker-nuclei:
+    build: ./api
+    mem_limit: 768m
+    cpus: 0.4
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://reconforge:reconforge@postgres:5432/reconforge
+      REDIS_URL: redis://redis:6379/0
+    command: celery -A app.workers.celery_app worker -Q nuclei --loglevel=info -c 1
+    depends_on: [postgres, redis]
+    volumes:
+      - ./programs:/programs:ro
+      - recon_artifacts:/artifacts
+
+  worker-ai:
+    build: ./api
+    mem_limit: 512m
+    cpus: 0.3
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://reconforge:reconforge@postgres:5432/reconforge
+      REDIS_URL: redis://redis:6379/0
+    command: celery -A app.workers.celery_app worker -Q ai --loglevel=info -c 2
+    depends_on: [postgres, redis]
+    volumes:
+      - ./programs:/programs:ro
+
+  beat:
+    build: ./api
+    mem_limit: 256m
+    cpus: 0.2
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://reconforge:reconforge@postgres:5432/reconforge
+      REDIS_URL: redis://redis:6379/0
+    command: celery -A app.workers.celery_app beat --loglevel=info
+    depends_on: [postgres, redis]
+
+  # The `workstation` queue is intentionally NOT consumed here. Run
+  # scripts/run_workstation_worker.sh directly on your workstation, pointed
+  # at this VPS's Redis over Tailscale, so Burp Assistant / manual-testing
+  # tasks never compete with the VPS's recon workers for CPU/RAM.
+
+volumes:
+  pgdata:
+  recon_artifacts:
